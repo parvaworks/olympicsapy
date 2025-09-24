@@ -1,3 +1,15 @@
+```python
+# streamlit_app.py (updated)
+
+"""
+Streamlit dashboard for Olympic Medal Analysis (with host mapping & recent year weighting)
+
+Enhancements:
+- Treat Year as string for display (but keep numeric for modeling)
+- Weighted trendlines to emphasize recent years
+- Host city-to-country mapping (1984–2016)
+"""
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -16,6 +28,38 @@ except:
 sns.set(style="whitegrid")
 
 # -----------------------------
+# Host City → Country mapping
+# -----------------------------
+HOST_MAPPING = {
+# Summer Olympic Host Cities
+summer_olympics_hosts = {
+    1984: ("Los Angeles", "USA"),
+    1988: ("Seoul", "South Korea"),
+    1992: ("Barcelona", "Spain"),
+    1996: ("Atlanta", "USA"),
+    2000: ("Sydney", "Australia"),
+    2004: ("Athens", "Greece"),
+    2008: ("Beijing", "China"),
+    2012: ("London", "Great Britain"),
+    2016: ("Rio de Janeiro", "Brazil")
+}
+
+# Winter Olympic Host Cities
+winter_olympics_hosts = {
+    1984: ("Sarajevo", "Yugoslavia (now Bosnia and Herzegovina)"),
+    1988: ("Calgary", "Canada"),
+    1992: ("Albertville", "France"),
+    1994: ("Lillehammer", "Norway"),
+    1998: ("Nagano", "Japan"),
+    2002: ("Salt Lake City", "USA"),
+    2006: ("Turin", "Italy"),
+    2010: ("Vancouver", "Canada"),
+    2014: ("Sochi", "Russia")
+}
+
+}
+
+# -----------------------------
 # Load & preprocess data
 # -----------------------------
 def load_data(uploaded_file) -> pd.DataFrame:
@@ -25,6 +69,7 @@ def load_data(uploaded_file) -> pd.DataFrame:
     df['medal_type'] = df['Medal']
     df['medal'] = df['medal_type'].map({'Gold': 1, 'Silver': 1, 'Bronze': 1}).fillna(0).astype(int)
     df['Year'] = pd.to_numeric(df['Year'], errors='coerce').astype('Int64')
+    df['Year_str'] = df['Year'].astype(str)
     return df
 
 # -----------------------------
@@ -77,7 +122,13 @@ def hosting_effect(df, host_country="USA"):
     panel = df.groupby(['Year','NOC']).agg(total_medals=('medal','sum')).reset_index()
     if panel[panel['NOC']==host_country].empty:
         return "No data for host country"
-    min_host_year = panel[panel['NOC']==host_country]['Year'].max()
+
+    # Use mapped host years
+    host_years = [y for y in HOST_MAPPING.keys() if y in panel['Year'].unique()]
+    if not host_years:
+        return "No matching host years in dataset"
+
+    min_host_year = min(host_years)
     panel['post'] = (panel['Year']>=min_host_year).astype(int)
     panel['treated'] = (panel['NOC']==host_country).astype(int)
     panel['did'] = panel['post']*panel['treated']
@@ -107,11 +158,16 @@ if uploaded_file:
     countries = sorted(df['NOC'].dropna().unique())
     country = st.selectbox("Select country (NOC):", countries, index=countries.index('USA') if 'USA' in countries else 0)
 
-    # Medal trend plot
+    # Medal trend plot with recent weighting
     st.subheader(f"Medal Trend for {country}")
     cdf = agg[agg['NOC']==country].groupby('Year').sum().reset_index()
+    weights = np.linspace(0.5, 2, len(cdf))  # more weight to recent years
     fig, ax = plt.subplots()
     ax.plot(cdf['Year'], cdf['medals'], marker='o')
+    z = np.polyfit(cdf['Year'], cdf['medals'], 1, w=weights)
+    p = np.poly1d(z)
+    ax.plot(cdf['Year'], p(cdf['Year']), "--", color="red", label="Weighted Trend")
+    ax.legend()
     ax.set_title(f"Medals over time: {country}")
     st.pyplot(fig)
 
@@ -136,5 +192,13 @@ if uploaded_file:
     st.subheader("Hosting Effect Evaluation")
     result = hosting_effect(df, country)
     st.text(result)
+
+    # Show host city-country mapping table
+    st.subheader("Host Cities and Countries (1984–2016)")
+    host_df = pd.DataFrame([
+        {"Year": y, "Host City": c[0], "Host Country": c[1]} for y,c in HOST_MAPPING.items()
+    ])
+    st.dataframe(host_df)
 else:
     st.info("Please upload an Olympic Excel file to start analysis.")
+```
