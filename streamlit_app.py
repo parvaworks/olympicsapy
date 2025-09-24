@@ -1,15 +1,3 @@
-```python
-# streamlit_app.py (updated)
-
-"""
-Streamlit dashboard for Olympic Medal Analysis (with host mapping & recent year weighting)
-
-Enhancements:
-- Treat Year as string for display (but keep numeric for modeling)
-- Weighted trendlines to emphasize recent years
-- Host city-to-country mapping (1984–2016)
-"""
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -201,4 +189,3 @@ if uploaded_file:
     st.dataframe(host_df)
 else:
     st.info("Please upload an Olympic Excel file to start analysis.")
-```
