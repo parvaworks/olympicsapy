@@ -79,16 +79,23 @@ def load_data(uploaded_file) -> pd.DataFrame:
     df['medal'] = df['medal_type'].map({'Gold': 1, 'Silver': 1, 'Bronze': 1}).fillna(0).astype(int)
     df['Year'] = pd.to_numeric(df['Year'], errors='coerce').astype('Int64')
     
-    # Determine season based on typical Olympic years
-    df['Season'] = df['Year'].apply(lambda x: 'Summer' if x % 4 == 0 else 'Winter' if x % 4 == 2 else 'Unknown')
+    # Accurate season detection based on known Olympic years
+    summer_years = [1984, 1988, 1992, 1996, 2000, 2004, 2008, 2012, 2016, 2020, 2024, 2028, 2032]
+    winter_years = [1984, 1988, 1992, 1994, 1998, 2002, 2006, 2010, 2014, 2018, 2022, 2026, 2030]
     
-    # Manual correction for known years
-    known_summer = [1984, 1988, 1992, 1996, 2000, 2004, 2008, 2012, 2016, 2020, 2024]
-    known_winter = [1984, 1988, 1992, 1994, 1998, 2002, 2006, 2010, 2014, 2018, 2022]
+    # Initialize all as Unknown first
+    df['Season'] = 'Unknown'
     
-    # More accurate season detection
-    df.loc[df['Year'].isin(known_summer), 'Season'] = 'Summer'
-    df.loc[df['Year'].isin([1984, 1988, 1992, 1994, 1998, 2002, 2006, 2010, 2014]), 'Season'] = 'Winter'
+    # Assign seasons based on known years
+    df.loc[df['Year'].isin(summer_years), 'Season'] = 'Summer'
+    df.loc[df['Year'].isin(winter_years), 'Season'] = 'Winter'
+    
+    # For years not explicitly listed, make educated guess
+    # Summer Olympics are typically in years divisible by 4 (except Winter Olympic years)
+    for year in df['Year'].dropna().unique():
+        if year not in summer_years + winter_years:
+            if year % 4 == 0 and year not in winter_years:
+                df.loc[df['Year'] == year, 'Season'] = 'Summer'
     
     return df
 
@@ -243,12 +250,22 @@ def forecast_medals_by_season(df, country='USA', season='Summer', n_periods=4):
         else:
             rf_forecast = [series.mean()] * n_periods
         
-        # Future years
-        last_year = series.index.max()
+        # Future years - proper Olympic scheduling
+        last_year = int(series.index.max())
+        future_years = []
+        
         if season == 'Summer':
-            future_years = [last_year + 4*i for i in range(1, n_periods+1)]
+            # Summer Olympics: 2016, 2020, 2024, 2028, 2032...
+            next_summer = 2020 if last_year < 2020 else ((last_year // 4 + 1) * 4)
+            if next_summer <= last_year:
+                next_summer += 4
+            future_years = [next_summer + 4*i for i in range(n_periods)]
         else:  # Winter
-            future_years = [last_year + 4*i for i in range(1, n_periods+1)]
+            # Winter Olympics: 2014, 2018, 2022, 2026, 2030...
+            next_winter = 2018 if last_year < 2018 else ((last_year // 4) * 4 + 2)
+            if next_winter <= last_year:
+                next_winter += 4
+            future_years = [next_winter + 4*i for i in range(n_periods)]
         
         return {
             'arima_forecast': arima_forecast,
@@ -431,10 +448,14 @@ if uploaded_file:
                         usa_forecast['rf_forecast']), 1):
                         
                         host_indicator = ""
-                        if current_season == 'Summer' and year == 2028:
-                            host_indicator = " 🏟️ **LA HOSTING**"
-                        elif current_season == 'Winter' and year in US_WINTER_HOST_YEARS:
-                            host_indicator = " 🏟️ **USA HOSTING**"
+                        if current_season == 'Summer' and year in [2028, 2032]:
+                            if year == 2028:
+                                host_indicator = " 🏟️ **LA 2028 HOSTING**"
+                            else:
+                                host_indicator = " (Brisbane hosting)"
+                        elif current_season == 'Winter':
+                            # Check for future US Winter hosting (none currently scheduled)
+                            pass
                         
                         st.write(f"**{year}:** ARIMA: {arima_pred:.0f}, RF: {rf_pred:.0f} pts{host_indicator}")
             
@@ -475,11 +496,15 @@ if uploaded_file:
                        linewidth=2, alpha=0.7, label='China ARIMA Forecast', color='lightcoral')
                 
                 # Highlight hosting years
-                if current_season == 'Summer' and 2028 in usa_years:
-                    ax.axvline(x=2028, color='gold', linestyle=':', alpha=0.8, linewidth=3)
-                    ax.text(2028, ax.get_ylim()[1]*0.9, 'USA Hosts\nLA 2028', 
-                           ha='center', fontweight='bold',
-                           bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.8))
+                if current_season == 'Summer':
+                    if 2028 in usa_years:
+                        ax.axvline(x=2028, color='gold', linestyle=':', alpha=0.8, linewidth=3)
+                        ax.text(2028, ax.get_ylim()[1]*0.9, 'USA Hosts\nLA 2028', 
+                               ha='center', fontweight='bold',
+                               bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.8))
+                elif current_season == 'Winter':
+                    # No current future Winter hosting for USA
+                    pass
                 
                 ax.set_title(f'USA vs China {current_season} Olympics - Weighted Score Comparison & Forecast')
                 ax.set_xlabel('Year')
@@ -525,3 +550,4 @@ else:
     - 🔮 **Season-specific forecasting** for strategic planning
     - 📊 **Head-to-head USA vs China comparison**
     """)
+    
