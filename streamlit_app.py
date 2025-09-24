@@ -6,6 +6,7 @@ import seaborn as sns
 import warnings
 from sklearn.ensemble import RandomForestRegressor
 import statsmodels.api as sm
+from scipy import stats
 
 try:
     import pmdarima as pm
@@ -16,47 +17,26 @@ except:
 sns.set_style("whitegrid")
 
 # -----------------------------
-# Host City → Country mapping
+# Olympic Games Timeline
 # -----------------------------
-# Summer Olympic Host Cities
-summer_olympics_hosts = {
-    1984: ("Los Angeles", "USA"),
-    1988: ("Seoul", "South Korea"),
-    1992: ("Barcelona", "Spain"),
-    1996: ("Atlanta", "USA"),
-    2000: ("Sydney", "Australia"),
-    2004: ("Athens", "Greece"),
-    2008: ("Beijing", "China"),
-    2012: ("London", "Great Britain"),
-    2016: ("Rio de Janeiro", "Brazil"),
-    2020: ("Tokyo", "Japan"),  # held in 2021
-    2024: ("Paris", "France"),
-    2028: ("Los Angeles", "USA"),  # upcoming
-    2032: ("Brisbane", "Australia")  # upcoming
+# Recent Olympic Games with host countries
+OLYMPIC_TIMELINE = {
+    1984: ("Los Angeles", "USA", "Summer"),
+    1988: ("Seoul", "South Korea", "Summer"), 
+    1992: ("Barcelona", "Spain", "Summer"),
+    1996: ("Atlanta", "USA", "Summer"),
+    2000: ("Sydney", "Australia", "Summer"),
+    2004: ("Athens", "Greece", "Summer"),
+    2008: ("Beijing", "China", "Summer"),
+    2012: ("London", "Great Britain", "Summer"),
+    2016: ("Rio de Janeiro", "Brazil", "Summer"),
+    2020: ("Tokyo", "Japan", "Summer"),  # Held in 2021
+    2024: ("Paris", "France", "Summer"),
+    2028: ("Los Angeles", "USA", "Summer"),  # Future
+    2032: ("Brisbane", "Australia", "Summer")  # Future
 }
 
-# Winter Olympic Host Cities
-winter_olympics_hosts = {
-    1984: ("Sarajevo", "Yugoslavia (now Bosnia and Herzegovina)"),
-    1988: ("Calgary", "Canada"),
-    1992: ("Albertville", "France"),
-    1994: ("Lillehammer", "Norway"),
-    1998: ("Nagano", "Japan"),
-    2002: ("Salt Lake City", "USA"),
-    2006: ("Turin", "Italy"),
-    2010: ("Vancouver", "Canada"),
-    2014: ("Sochi", "Russia"),
-    2018: ("PyeongChang", "South Korea"),
-    2022: ("Beijing", "China"),
-    2026: ("Milano Cortina", "Italy"),  # upcoming
-    2030: ("French Alps", "France")  # upcoming
-}
-
-# Combined host mapping
-HOST_MAPPING = {**summer_olympics_hosts, **winter_olympics_hosts}
-
-# USA hosting years for analysis
-USA_HOST_YEARS = [1984, 1996, 2002, 2028]  # LA, Atlanta, Salt Lake City, LA future
+US_HOST_YEARS = [1984, 1996, 2028]  # US hosting years
 
 # -----------------------------
 # Load & preprocess data
@@ -68,429 +48,408 @@ def load_data(uploaded_file) -> pd.DataFrame:
     df['medal_type'] = df['Medal']
     df['medal'] = df['medal_type'].map({'Gold': 1, 'Silver': 1, 'Bronze': 1}).fillna(0).astype(int)
     df['Year'] = pd.to_numeric(df['Year'], errors='coerce').astype('Int64')
-    df['Year_str'] = df['Year'].astype(str)
     return df
 
 # -----------------------------
-# Aggregation
+# Analysis Functions
 # -----------------------------
-def aggregate_medals(df: pd.DataFrame) -> pd.DataFrame:
-    df['is_gold'] = (df['medal_type'] == 'Gold').astype(int)
-    df['is_silver'] = (df['medal_type'] == 'Silver').astype(int)
-    df['is_bronze'] = (df['medal_type'] == 'Bronze').astype(int)
-    agg = df.groupby(['Year','NOC','Sport'], dropna=False).agg(
-        medals=('medal','sum'),
-        golds=('is_gold','sum'),
-        silvers=('is_silver','sum'),
-        bronzes=('is_bronze','sum')
-    ).reset_index()
-    return agg
-
-# -----------------------------
-# USA Strategic Analysis
-# -----------------------------
-def analyze_usa_dominance(df, agg):
-    """Analyze USA's position relative to other top nations"""
-    country_totals = agg.groupby(['Year', 'NOC']).agg(
-        total_medals=('medals', 'sum'),
-        total_golds=('golds', 'sum')
+def analyze_usa_hosting_advantage(df):
+    """Comprehensive analysis of USA hosting advantage"""
+    
+    # Get USA medal counts by year
+    usa_medals = df[df['NOC'] == 'USA'].groupby('Year').agg(
+        total_medals=('medal', 'sum'),
+        gold_medals=('medal_type', lambda x: (x == 'Gold').sum()),
+        silver_medals=('medal_type', lambda x: (x == 'Silver').sum()),
+        bronze_medals=('medal_type', lambda x: (x == 'Bronze').sum())
     ).reset_index()
     
-    # Get top 5 countries by total medals across all years
-    top_countries = country_totals.groupby('NOC')['total_medals'].sum().nlargest(10).index.tolist()
+    # Add hosting information
+    usa_medals['is_host'] = usa_medals['Year'].isin(US_HOST_YEARS)
+    usa_medals['host_info'] = usa_medals['Year'].map(
+        lambda x: f"{OLYMPIC_TIMELINE.get(x, ('Unknown', 'Unknown', 'Unknown'))[0]}" 
+        if x in US_HOST_YEARS else "Not Hosting"
+    )
     
-    # Year-over-year rankings
-    yearly_rankings = []
-    for year in sorted(country_totals['Year'].unique()):
-        year_data = country_totals[country_totals['Year'] == year].sort_values('total_medals', ascending=False).head(10)
-        year_data['rank'] = range(1, len(year_data) + 1)
-        yearly_rankings.append(year_data[['Year', 'NOC', 'total_medals', 'rank']])
-    
-    rankings_df = pd.concat(yearly_rankings)
-    usa_rankings = rankings_df[rankings_df['NOC'] == 'USA'].copy()
-    
-    return rankings_df, usa_rankings, top_countries
+    return usa_medals
 
-def hosting_effect_detailed(df):
-    """Detailed hosting effect analysis for USA"""
-    panel = df.groupby(['Year','NOC']).agg(total_medals=('medal','sum')).reset_index()
+def calculate_hosting_effect_detailed(df):
+    """Detailed hosting effect analysis with proper interpretation"""
     
-    # Create hosting indicator
-    panel['usa_hosting'] = ((panel['Year'].isin(USA_HOST_YEARS)) & (panel['NOC'] == 'USA')).astype(int)
-    panel['usa_country'] = (panel['NOC'] == 'USA').astype(int)
-    panel['post_1984'] = (panel['Year'] >= 1984).astype(int)
+    # Create panel data
+    panel = df.groupby(['Year', 'NOC']).agg(
+        total_medals=('medal', 'sum')
+    ).reset_index()
     
-    # Interaction term for USA in hosting years
-    panel['usa_host_interaction'] = panel['usa_hosting']
+    # USA specific analysis
+    usa_data = panel[panel['NOC'] == 'USA'].copy()
     
-    try:
-        X = sm.add_constant(panel[['usa_country', 'post_1984', 'usa_host_interaction']])
-        model = sm.OLS(panel['total_medals'], X).fit()
-        return model, panel
-    except Exception as e:
-        return None, panel
-
-# -----------------------------
-# Forecasting with proper year labels
-# -----------------------------
-def forecast_with_years(series, start_year=2024, n_periods=4):
-    """Generate forecasts with proper Olympic year labels"""
-    # Olympic games are every 4 years for Summer, 2 years offset for Winter
-    # For simplicity, assume we're forecasting Summer Olympics
-    future_years = []
-    current_year = start_year
+    if usa_data.empty:
+        return None, "No USA data found"
     
-    # Find next Olympic years (Summer Olympics: 2024, 2028, 2032, 2036)
-    if start_year <= 2024:
-        future_years = [2024, 2028, 2032, 2036]
+    # Create treatment variables
+    usa_data['is_host_year'] = usa_data['Year'].isin(US_HOST_YEARS)
+    
+    # Calculate differences
+    host_performance = usa_data[usa_data['is_host_year']]['total_medals'].mean()
+    non_host_performance = usa_data[~usa_data['is_host_year']]['total_medals'].mean()
+    hosting_boost = host_performance - non_host_performance
+    
+    # Statistical test
+    host_medals = usa_data[usa_data['is_host_year']]['total_medals']
+    non_host_medals = usa_data[~usa_data['is_host_year']]['total_medals']
+    
+    if len(host_medals) > 0 and len(non_host_medals) > 0:
+        t_stat, p_value = stats.ttest_ind(host_medals, non_host_medals)
     else:
-        base_year = 2024
-        while base_year <= start_year:
-            base_year += 4
-        future_years = [base_year + i*4 for i in range(n_periods)]
+        t_stat, p_value = 0, 1
+    
+    # Difference-in-differences analysis
+    panel['treated'] = (panel['NOC'] == 'USA').astype(int)
+    panel['post_1984'] = (panel['Year'] >= 1984).astype(int)
+    panel['did'] = panel['treated'] * panel['post_1984']
     
     try:
-        if PM_AVAILABLE and len(series) >= 3:
+        X = sm.add_constant(panel[['treated', 'post_1984', 'did']])
+        model = sm.OLS(panel['total_medals'], X).fit()
+        did_result = model
+    except:
+        did_result = None
+    
+    return {
+        'usa_data': usa_data,
+        'host_performance': host_performance,
+        'non_host_performance': non_host_performance,
+        'hosting_boost': hosting_boost,
+        't_stat': t_stat,
+        'p_value': p_value,
+        'did_model': did_result
+    }, None
+
+def forecast_usa_medals_detailed(df):
+    """Enhanced forecasting with proper year labeling"""
+    
+    usa_medals = df[df['NOC'] == 'USA'].groupby('Year')['medal'].sum().sort_index()
+    
+    if len(usa_medals) < 3:
+        return None, "Insufficient data for forecasting"
+    
+    # ARIMA forecast
+    try:
+        if PM_AVAILABLE:
             with warnings.catch_warnings():
                 warnings.filterwarnings('ignore')
-                model = pm.auto_arima(series, seasonal=False, error_action='ignore', suppress_warnings=True)
-            forecasts = model.predict(n_periods=n_periods)
+                arima_model = pm.auto_arima(usa_medals, seasonal=False, error_action='ignore', suppress_warnings=True)
+            arima_forecast = arima_model.predict(n_periods=4)
         else:
-            if len(series) >= 3:
-                model = sm.tsa.ARIMA(series, order=(1,0,0)).fit()
-                forecasts = model.forecast(steps=n_periods)
-            else:
-                forecasts = [series.mean()] * n_periods
-    except Exception as e:
-        forecasts = [series.mean()] * n_periods
+            arima_model = sm.tsa.ARIMA(usa_medals, order=(1,1,1)).fit()
+            arima_forecast = arima_model.forecast(steps=4)
+    except:
+        arima_forecast = [usa_medals.mean()] * 4
     
-    return list(zip(future_years[:n_periods], forecasts))
-
-def interpret_forecasts(arima_results, rf_results):
-    """Provide interpretation of forecasting results"""
-    arima_avg = np.mean([pred for _, pred in arima_results])
-    rf_avg = np.mean([pred for _, pred in rf_results])
-    
-    interpretation = f"""
-    **Forecast Analysis Interpretation:**
-    
-    📈 **ARIMA Model** (Time Series Analysis):
-    - Average predicted medals per Games: {arima_avg:.1f}
-    - This model captures trends and patterns in USA's historical medal performance
-    - Shows {'upward' if arima_avg > 100 else 'stable'} trajectory based on historical trends
-    
-    🤖 **Random Forest Model** (Machine Learning):
-    - Average predicted medals per Games: {rf_avg:.1f}
-    - This model considers recent performance patterns and momentum
-    - Suggests {'strong' if rf_avg > 150 else 'moderate'} performance based on recent patterns
-    
-    🎯 **Strategic Implications:**
-    - USA is predicted to maintain {'strong' if min(arima_avg, rf_avg) > 100 else 'competitive'} medal performance
-    - The 2028 Los Angeles Olympics present a strategic opportunity for enhanced performance
-    - Hosting advantage could boost medal count by 15-25% based on historical patterns
-    """
-    
-    return interpretation
-
-def interpret_hosting_effect(model_results):
-    """Interpret the hosting effect regression results"""
-    if model_results is None:
-        return "Unable to perform hosting effect analysis"
-    
+    # Random Forest forecast
     try:
-        coeffs = model_results.params
-        pvals = model_results.pvalues
+        # Create lag features
+        df_rf = pd.DataFrame({'medals': usa_medals})
+        for lag in range(1, 5):
+            df_rf[f'lag_{lag}'] = df_rf['medals'].shift(lag)
         
-        hosting_coeff = coeffs.get('usa_host_interaction', 0)
-        hosting_pval = pvals.get('usa_host_interaction', 1)
+        df_rf = df_rf.dropna()
         
-        interpretation = f"""
-        **Hosting Effect Analysis Interpretation:**
-        
-        🏟️ **USA Hosting Advantage:**
-        - Hosting effect coefficient: {hosting_coeff:.2f}
-        - Statistical significance: {'Significant' if hosting_pval < 0.05 else 'Not significant'} (p={hosting_pval:.3f})
-        
-        📊 **What this means:**
-        {'✅ USA gains approximately ' + str(int(hosting_coeff)) + ' additional medals when hosting' if hosting_pval < 0.05 and hosting_coeff > 0 else '❓ No clear hosting advantage detected in the data'}
-        
-        🎯 **Strategic Implications for 2028 LA Olympics:**
-        - Historical hosting provides measurable advantage
-        - Home crowd support and familiar venues boost performance
-        - Increased funding and preparation for host nation athletes
-        - Strategic opportunity to reclaim #1 position globally
-        
-        📈 **Model Statistics:**
-        - R-squared: {model_results.rsquared:.3f} ({model_results.rsquared*100:.1f}% of variance explained)
-        - Model significance: {'Highly significant' if model_results.f_pvalue < 0.001 else 'Significant' if model_results.f_pvalue < 0.05 else 'Not significant'}
-        """
-        
-        return interpretation
-    except Exception as e:
-        return f"Error interpreting hosting effect: {str(e)}"
+        if len(df_rf) >= 2:
+            X = df_rf[[f'lag_{i}' for i in range(1, 5)]]
+            y = df_rf['medals']
+            
+            rf_model = RandomForestRegressor(n_estimators=200, random_state=42)
+            rf_model.fit(X, y)
+            
+            # Generate predictions
+            last_values = list(usa_medals.tail(4))
+            rf_forecast = []
+            
+            for _ in range(4):
+                pred = rf_model.predict([last_values[-4:]])[0]
+                rf_forecast.append(max(0, pred))
+                last_values.append(pred)
+        else:
+            rf_forecast = [usa_medals.mean()] * 4
+    except:
+        rf_forecast = [usa_medals.mean()] * 4
+    
+    # Future Olympic years
+    last_year = usa_medals.index.max()
+    future_years = []
+    
+    # Determine future Olympic years (every 4 years from last known)
+    for i in range(1, 5):
+        next_year = last_year + (4 * i)
+        future_years.append(next_year)
+    
+    return {
+        'arima_forecast': arima_forecast,
+        'rf_forecast': rf_forecast,
+        'future_years': future_years,
+        'historical_data': usa_medals
+    }, None
 
 # -----------------------------
-# Streamlit App
+# Streamlit Dashboard
 # -----------------------------
-st.title("🇺🇸 USA Olympic Strategic Advantage Analysis")
-st.subheader("Evaluating hosting impact on reclaiming global sports dominance")
+st.set_page_config(page_title="US Olympic Hosting Advantage Analysis", layout="wide")
+
+st.title("🇺🇸 US Olympic Hosting Advantage Analysis")
+st.markdown("**Evaluating if hosting the Games provides the US with a strategic advantage in reclaiming top spot and global influence in international sports**")
 
 uploaded_file = st.file_uploader("Upload Olympic Excel file", type=["xlsx"])
 
 if uploaded_file:
     try:
         df = load_data(uploaded_file)
-        agg = aggregate_medals(df)
-
-        # Strategic Overview
-        st.header("📊 Strategic Overview")
         
-        col1, col2, col3 = st.columns(3)
+        # Sidebar for analysis controls
+        st.sidebar.header("Analysis Controls")
+        show_detailed_stats = st.sidebar.checkbox("Show Detailed Statistics", True)
+        show_sport_breakdown = st.sidebar.checkbox("Show Sport-wise Analysis", True)
         
-        usa_total = agg[agg['NOC'] == 'USA']['medals'].sum()
-        usa_golds = agg[agg['NOC'] == 'USA']['golds'].sum()
-        recent_year = int(df['Year'].dropna().max())
-        usa_recent = agg[(agg['NOC'] == 'USA') & (agg['Year'] == recent_year)]['medals'].sum()
+        # Main Analysis
+        col1, col2 = st.columns([2, 1])
         
         with col1:
-            st.metric("Total USA Medals (Historical)", usa_total)
+            st.header("🏆 USA Olympic Performance Analysis")
+            
+            # USA performance over time
+            usa_analysis = analyze_usa_hosting_advantage(df)
+            
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+            
+            # Plot 1: Medal count over time with hosting years highlighted
+            ax1.plot(usa_analysis['Year'], usa_analysis['total_medals'], 
+                    marker='o', linewidth=2, markersize=8, color='navy', label='Total Medals')
+            
+            # Highlight hosting years
+            host_data = usa_analysis[usa_analysis['is_host']]
+            ax1.scatter(host_data['Year'], host_data['total_medals'], 
+                       color='red', s=200, alpha=0.7, marker='*', 
+                       label='Hosting Years', zorder=5)
+            
+            ax1.set_title('USA Olympic Medal Performance (1984-2016)', fontsize=14, fontweight='bold')
+            ax1.set_xlabel('Year')
+            ax1.set_ylabel('Total Medals')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            
+            # Add annotations for hosting years
+            for _, row in host_data.iterrows():
+                ax1.annotate(f'{int(row["Year"])}\n{row["host_info"]}', 
+                           (row['Year'], row['total_medals']),
+                           textcoords="offset points", xytext=(0,20), ha='center',
+                           bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7))
+            
+            # Plot 2: Medal type breakdown
+            ax2.bar(usa_analysis['Year'], usa_analysis['gold_medals'], 
+                   label='Gold', color='gold', alpha=0.8)
+            ax2.bar(usa_analysis['Year'], usa_analysis['silver_medals'], 
+                   bottom=usa_analysis['gold_medals'], label='Silver', color='silver', alpha=0.8)
+            ax2.bar(usa_analysis['Year'], usa_analysis['bronze_medals'], 
+                   bottom=usa_analysis['gold_medals'] + usa_analysis['silver_medals'], 
+                   label='Bronze', color='#CD7F32', alpha=0.8)
+            
+            ax2.set_title('USA Medal Composition by Type', fontsize=14, fontweight='bold')
+            ax2.set_xlabel('Year')
+            ax2.set_ylabel('Number of Medals')
+            ax2.legend()
+            ax2.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close()
+        
         with col2:
-            st.metric("Total USA Gold Medals", usa_golds)
-        with col3:
-            st.metric(f"USA Medals in {recent_year}", usa_recent)
-
-        # USA Dominance Analysis
-        st.header("🏆 USA Global Position Analysis")
-        rankings_df, usa_rankings, top_countries = analyze_usa_dominance(df, agg)
-        
-        # USA ranking trend
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(usa_rankings['Year'], usa_rankings['rank'], marker='o', linewidth=3, markersize=8, color='red')
-        ax.set_ylabel('Olympic Ranking')
-        ax.set_xlabel('Year')
-        ax.set_title('USA Olympic Medal Ranking Over Time (Lower is Better)', fontsize=14, fontweight='bold')
-        ax.grid(True, alpha=0.3)
-        ax.invert_yaxis()  # Lower rank numbers at top
-        
-        # Highlight hosting years
-        for year in USA_HOST_YEARS:
-            if year in usa_rankings['Year'].values:
-                ax.axvline(x=year, color='gold', linestyle='--', alpha=0.7, linewidth=2)
-                ax.text(year, ax.get_ylim()[1], f'HOST\n{year}', ha='center', va='bottom', 
-                       bbox=dict(boxstyle='round,pad=0.3', facecolor='gold', alpha=0.7))
-        
-        st.pyplot(fig)
-        plt.close()
-
-        # Top competitors comparison
-        st.subheader("🥇 Medal Competition: USA vs Top Nations")
-        recent_comparison = rankings_df[rankings_df['Year'] == recent_year].head(8)
-        
-        fig, ax = plt.subplots(figsize=(12, 6))
-        colors = ['#FF6B6B' if noc == 'USA' else '#4ECDC4' for noc in recent_comparison['NOC']]
-        bars = ax.bar(recent_comparison['NOC'], recent_comparison['total_medals'], color=colors)
-        
-        # Highlight USA bar
-        for i, bar in enumerate(bars):
-            if recent_comparison.iloc[i]['NOC'] == 'USA':
-                bar.set_edgecolor('red')
-                bar.set_linewidth(3)
-        
-        ax.set_title(f'Medal Count Comparison - {recent_year}', fontsize=14, fontweight='bold')
-        ax.set_ylabel('Total Medals')
-        plt.xticks(rotation=45)
-        st.pyplot(fig)
-        plt.close()
-
-        # Sport-wise USA performance
-        st.header("🏅 USA Sport-wise Medal Performance")
-        usa_sports = agg[agg['NOC'] == 'USA'].groupby('Sport').agg(
-            total_medals=('medals', 'sum'),
-            golds=('golds', 'sum')
-        ).reset_index().sort_values('total_medals', ascending=False).head(15)
-        
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 8))
-        
-        # Total medals by sport
-        ax1.barh(usa_sports['Sport'], usa_sports['total_medals'], color='steelblue')
-        ax1.set_title('USA Total Medals by Sport (Top 15)')
-        ax1.set_xlabel('Total Medals')
-        
-        # Gold medals by sport  
-        ax2.barh(usa_sports['Sport'], usa_sports['golds'], color='gold')
-        ax2.set_title('USA Gold Medals by Sport (Top 15)')
-        ax2.set_xlabel('Gold Medals')
-        
-        plt.tight_layout()
-        st.pyplot(fig)
-        plt.close()
-
-        # Forecasting Analysis
-        st.header("🔮 USA Medal Forecasting Analysis")
-        
-        usa_series = agg[agg['NOC'] == 'USA'].groupby('Year')['medals'].sum()
-        
-        if len(usa_series) > 0:
-            # Get forecasts with proper years
-            arima_results = forecast_with_years(usa_series, start_year=2024, n_periods=4)
+            st.header("📊 Key Metrics")
             
-            # RF forecast (keeping original logic but with year labels)
-            try:
-                cdf = agg[agg['NOC'] == 'USA'].groupby('Year').sum().reset_index()
-                if len(cdf) >= 4:
-                    for lag in range(1, 5):
-                        cdf[f'lag_{lag}'] = cdf['medals'].shift(lag).fillna(0)
-                    cdf = cdf.dropna()
-                    
-                    if len(cdf) >= 2:
-                        X, y = cdf[[f'lag_{i}' for i in range(1, 5)]], cdf['medals']
-                        model = RandomForestRegressor(n_estimators=200, random_state=42)
-                        model.fit(X, y)
-                        last_lags = list(X.iloc[-1])
-                        rf_preds = []
-                        for _ in range(4):
-                            p = model.predict([last_lags[-4:]])[0]
-                            rf_preds.append(max(0, float(p)))
-                            last_lags.append(p)
-                        rf_results = list(zip([year for year, _ in arima_results], rf_preds))
-                    else:
-                        rf_results = [(year, usa_series.mean()) for year, _ in arima_results]
-                else:
-                    rf_results = [(year, usa_series.mean()) for year, _ in arima_results]
-            except:
-                rf_results = [(year, usa_series.mean()) for year, _ in arima_results]
+            # Calculate key statistics
+            host_years_data = usa_analysis[usa_analysis['is_host']]
+            non_host_data = usa_analysis[~usa_analysis['is_host']]
             
-            # Display forecasts
+            if not host_years_data.empty and not non_host_data.empty:
+                host_avg = host_years_data['total_medals'].mean()
+                non_host_avg = non_host_data['total_medals'].mean()
+                boost_percentage = ((host_avg - non_host_avg) / non_host_avg) * 100
+                
+                st.metric("Avg Medals (Hosting)", f"{host_avg:.1f}", 
+                         f"+{host_avg - non_host_avg:.1f}")
+                st.metric("Avg Medals (Non-hosting)", f"{non_host_avg:.1f}")
+                st.metric("Hosting Boost", f"{boost_percentage:.1f}%")
+                
+                # Show hosting years performance
+                st.subheader("🏟️ USA Hosting Performance")
+                for _, row in host_years_data.iterrows():
+                    year = int(row['Year'])
+                    medals = int(row['total_medals'])
+                    city = row['host_info']
+                    st.write(f"**{year}** ({city}): **{medals}** medals")
+        
+        # Detailed Hosting Effect Analysis
+        st.header("📈 Hosting Effect Statistical Analysis")
+        
+        hosting_analysis, error = calculate_hosting_effect_detailed(df)
+        
+        if hosting_analysis and not error:
             col1, col2 = st.columns(2)
             
             with col1:
-                st.subheader("📈 ARIMA Forecast")
-                for year, pred in arima_results:
-                    host_indicator = "🏟️ (HOSTING)" if year in USA_HOST_YEARS else ""
-                    st.write(f"**{year}:** {pred:.1f} medals {host_indicator}")
+                st.subheader("Statistical Summary")
+                st.write(f"**Average medals when hosting:** {hosting_analysis['host_performance']:.1f}")
+                st.write(f"**Average medals when not hosting:** {hosting_analysis['non_host_performance']:.1f}")
+                st.write(f"**Hosting advantage:** {hosting_analysis['hosting_boost']:.1f} medals")
+                st.write(f"**T-statistic:** {hosting_analysis['t_stat']:.3f}")
+                st.write(f"**P-value:** {hosting_analysis['p_value']:.3f}")
+                
+                if hosting_analysis['p_value'] < 0.05:
+                    st.success("✅ **Statistically significant hosting advantage detected!**")
+                else:
+                    st.warning("⚠️ **No statistically significant hosting advantage detected**")
             
             with col2:
-                st.subheader("🤖 Random Forest Forecast")
-                for year, pred in rf_results:
-                    host_indicator = "🏟️ (HOSTING)" if year in USA_HOST_YEARS else ""
-                    st.write(f"**{year}:** {pred:.1f} medals {host_indicator}")
+                st.subheader("Interpretation")
+                if hosting_analysis['hosting_boost'] > 0:
+                    st.write("🔍 **Key Findings:**")
+                    st.write(f"• USA wins {hosting_analysis['hosting_boost']:.1f} more medals on average when hosting")
+                    st.write(f"• This represents a {(hosting_analysis['hosting_boost']/hosting_analysis['non_host_performance']*100):.1f}% performance boost")
+                    
+                    if hosting_analysis['p_value'] < 0.05:
+                        st.write("• The advantage is statistically significant")
+                        st.write("• **Strategic implication:** Hosting provides measurable competitive advantage")
+                    else:
+                        st.write("• The advantage may be due to random variation")
+                
+        # Forecasting Analysis
+        st.header("🔮 USA Medal Forecasting for Future Olympics")
+        
+        forecast_results, forecast_error = forecast_usa_medals_detailed(df)
+        
+        if forecast_results and not forecast_error:
+            col1, col2 = st.columns(2)
             
-            # Forecast interpretation
-            st.markdown(interpret_forecasts(arima_results, rf_results))
+            with col1:
+                st.subheader("ARIMA Forecast")
+                for i, (year, pred) in enumerate(zip(forecast_results['future_years'], forecast_results['arima_forecast']), 1):
+                    host_indicator = " 🏟️ **HOSTING**" if year in [2028, 2032] else ""
+                    st.write(f"**{year}:** {pred:.0f} medals{host_indicator}")
+                
+                st.subheader("Random Forest Forecast")
+                for i, (year, pred) in enumerate(zip(forecast_results['future_years'], forecast_results['rf_forecast']), 1):
+                    host_indicator = " 🏟️ **HOSTING**" if year in [2028, 2032] else ""
+                    st.write(f"**{year}:** {pred:.0f} medals{host_indicator}")
             
-            # Visualization of forecasts
-            fig, ax = plt.subplots(figsize=(12, 6))
+            with col2:
+                st.subheader("Forecast Visualization")
+                
+                fig, ax = plt.subplots(figsize=(10, 6))
+                
+                # Historical data
+                historical_years = list(forecast_results['historical_data'].index)
+                historical_medals = list(forecast_results['historical_data'].values)
+                
+                ax.plot(historical_years, historical_medals, 'o-', 
+                       linewidth=2, markersize=6, label='Historical', color='navy')
+                
+                # Forecasts
+                future_years = forecast_results['future_years']
+                ax.plot(future_years, forecast_results['arima_forecast'], 's--', 
+                       linewidth=2, markersize=8, label='ARIMA Forecast', color='red', alpha=0.7)
+                ax.plot(future_years, forecast_results['rf_forecast'], '^--', 
+                       linewidth=2, markersize=8, label='RF Forecast', color='green', alpha=0.7)
+                
+                # Highlight 2028 (USA hosting)
+                if 2028 in future_years:
+                    idx_2028 = future_years.index(2028)
+                    ax.axvline(x=2028, color='gold', linestyle=':', alpha=0.7, linewidth=3)
+                    ax.text(2028, max(forecast_results['arima_forecast'] + forecast_results['rf_forecast']), 
+                           'USA Hosts\nLA 2028', ha='center', va='bottom', 
+                           bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.8))
+                
+                ax.set_title('USA Olympic Medal Forecasting', fontweight='bold')
+                ax.set_xlabel('Year')
+                ax.set_ylabel('Medals')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                
+                st.pyplot(fig)
+                plt.close()
+        
+        # Strategic Implications
+        st.header("🎯 Strategic Implications for US Olympic Dominance")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Key Findings")
+            if hosting_analysis:
+                if hosting_analysis['hosting_boost'] > 0:
+                    st.success(f"✅ **Hosting Advantage Confirmed:** USA gains {hosting_analysis['hosting_boost']:.0f} additional medals when hosting")
+                    st.info("🏟️ **2028 Los Angeles Olympics:** Prime opportunity for medal dominance")
+                    st.write("📈 **Recommended Strategy:** Maximize home field advantage through:")
+                    st.write("• Enhanced athlete preparation and support")
+                    st.write("• Crowd support and familiar conditions")
+                    st.write("• Strategic event scheduling optimization")
+                
+        with col2:
+            st.subheader("Global Competition Context")
             
-            # Historical data
-            ax.plot(usa_series.index, usa_series.values, 'o-', label='Historical', linewidth=2, markersize=6)
+            # Top competitors analysis
+            recent_year = df['Year'].max()
+            top_countries = df[df['Year'] == recent_year].groupby('NOC')['medal'].sum().sort_values(ascending=False).head(10)
             
-            # Forecasts
-            arima_years, arima_preds = zip(*arima_results)
-            rf_years, rf_preds = zip(*rf_results)
-            
-            ax.plot(arima_years, arima_preds, 's--', label='ARIMA Forecast', linewidth=2, markersize=8, color='red')
-            ax.plot(rf_years, rf_preds, '^--', label='Random Forest Forecast', linewidth=2, markersize=8, color='green')
-            
-            # Highlight hosting years
-            for year in USA_HOST_YEARS:
-                if year >= min(arima_years):
-                    ax.axvline(x=year, color='gold', linestyle=':', alpha=0.8, linewidth=3)
-                    ax.text(year, ax.get_ylim()[1]*0.9, 'HOSTING', rotation=90, ha='center', va='top',
-                           bbox=dict(boxstyle='round,pad=0.3', facecolor='gold', alpha=0.7))
-            
-            ax.set_title('USA Medal Performance: Historical Trends & Strategic Forecasts', fontsize=14, fontweight='bold')
-            ax.set_xlabel('Year')
+            fig, ax = plt.subplots(figsize=(8, 6))
+            colors = ['red' if country == 'USA' else 'lightblue' for country in top_countries.index]
+            top_countries.plot(kind='bar', ax=ax, color=colors)
+            ax.set_title(f'Top Medal Winners - {recent_year} Olympics')
             ax.set_ylabel('Total Medals')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
+            plt.xticks(rotation=45)
             st.pyplot(fig)
             plt.close()
-
-        # Hosting Effect Analysis
-        st.header("🏟️ Hosting Effect: Strategic Advantage Analysis")
         
-        hosting_model, panel_data = hosting_effect_detailed(df)
-        
-        if hosting_model is not None:
-            # Display detailed regression results
-            with st.expander("📊 Detailed Regression Results"):
-                st.text(hosting_model.summary().as_text())
+        # Sport-wise breakdown if requested
+        if show_sport_breakdown:
+            st.header("🏅 Sport-wise Performance Analysis")
             
-            # Interpretation
-            st.markdown(interpret_hosting_effect(hosting_model))
+            usa_sports = df[df['NOC'] == 'USA'].groupby(['Sport', 'Year']).agg(
+                medals=('medal', 'sum'),
+                golds=('medal_type', lambda x: (x == 'Gold').sum())
+            ).reset_index()
             
-            # Hosting years performance comparison
-            st.subheader("📈 USA Performance: Hosting vs Non-Hosting Years")
+            # Top sports for USA
+            top_sports = usa_sports.groupby('Sport')['medals'].sum().sort_values(ascending=False).head(10)
             
-            usa_panel = panel_data[panel_data['NOC'] == 'USA'].copy()
-            hosting_performance = usa_panel[usa_panel['usa_hosting'] == 1]['total_medals'].mean()
-            non_hosting_performance = usa_panel[usa_panel['usa_hosting'] == 0]['total_medals'].mean()
+            fig, ax = plt.subplots(figsize=(12, 6))
+            top_sports.plot(kind='bar', ax=ax, color='steelblue')
+            ax.set_title('USA Top 10 Sports by Total Medals')
+            ax.set_ylabel('Total Medals')
+            plt.xticks(rotation=45)
+            st.pyplot(fig)
+            plt.close()
             
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Avg Medals (Hosting Years)", f"{hosting_performance:.1f}")
-            with col2:
-                st.metric("Avg Medals (Non-Hosting)", f"{non_hosting_performance:.1f}")
-            with col3:
-                boost = ((hosting_performance - non_hosting_performance) / non_hosting_performance) * 100
-                st.metric("Hosting Boost", f"+{boost:.1f}%")
-
-        # Strategic Recommendations
-        st.header("🎯 Strategic Recommendations for USA")
-        
-        st.markdown("""
-        ### Key Strategic Insights:
-        
-        **1. 🏟️ Hosting Advantage**
-        - The 2028 Los Angeles Olympics present a critical opportunity
-        - Historical data shows measurable performance boost when hosting
-        - Home advantage extends beyond crowd support to training facilities and logistics
-        
-        **2. 📈 Competitive Positioning**
-        - USA maintains strong medal performance but faces increased global competition
-        - Key competitor nations are consistently improving their programs
-        - Sport-specific investments needed in high-medal-yield disciplines
-        
-        **3. 🎯 2028 LA Olympics Strategy**
-        - Leverage hosting advantage for maximum medal yield
-        - Focus resources on sports with highest medal potential
-        - Implement comprehensive athlete development programs leading up to 2028
-        - Use home games as launchpad for sustained global dominance through 2032
-        
-        **4. 📊 Data-Driven Decisions**
-        - Forecasting models suggest strong potential for 150+ medal performance
-        - Historical trends indicate USA can reclaim #1 global position
-        - Investment in sports science and athlete development shows measurable returns
-        """)
-
-        # Future Olympic Schedule
-        st.header("📅 Future Olympic Hosting Opportunities")
-        future_hosts = pd.DataFrame([
-            {"Year": 2024, "Season": "Summer", "Host": "Paris, France", "USA Status": "Competitor"},
-            {"Year": 2026, "Season": "Winter", "Host": "Milano Cortina, Italy", "USA Status": "Competitor"},
-            {"Year": 2028, "Season": "Summer", "Host": "Los Angeles, USA", "USA Status": "🏟️ HOST"},
-            {"Year": 2030, "Season": "Winter", "Host": "French Alps, France", "USA Status": "Competitor"},
-            {"Year": 2032, "Season": "Summer", "Host": "Brisbane, Australia", "USA Status": "Post-Hosting Momentum"}
-        ])
-        
-        st.dataframe(future_hosts, use_container_width=True)
+            st.dataframe(usa_sports.pivot_table(index='Sport', columns='Year', values='medals', fill_value=0))
         
     except Exception as e:
-        st.error(f"An error occurred: {str(e)}")
-        st.error("Please check if your Excel file has the expected columns (Year, NOC, Sport, Medal)")
+        st.error(f"Error processing data: {str(e)}")
+        st.error("Please ensure your Excel file contains columns: Year, NOC, Sport, Medal")
 
 else:
-    st.info("🔬 **Upload Olympic dataset to begin strategic analysis**")
+    st.info("📁 Please upload an Olympic dataset (Excel format) to begin the analysis")
     st.markdown("""
-    **Expected file format:**
+    **Expected dataset format:**
     - Excel file (.xlsx) 
-    - Required columns: Year, NOC (country code), Sport, Medal
-    - Medal column should contain: Gold, Silver, Bronze, or NA/empty for no medal
-    
-    **Analysis Features:**
-    - 📊 USA global competitive positioning
-    - 🏆 Sport-wise medal tracking and optimization
-    - 🔮 Advanced forecasting (ARIMA + Machine Learning)
-    - 🏟️ Hosting effect quantification
-    - 🎯 Strategic recommendations for 2028 LA Olympics
+    - Required columns: **Year, NOC, Sport, Medal**
+    - Medal values: Gold, Silver, Bronze, or NA/empty
+    - Years: 1984-2016 (or broader range)
     """)
+    
+    # Show preview of analysis capabilities
+    st.subheader("🔍 This analysis will provide:")
+    st.write("✅ **Hosting Effect Quantification** - Statistical evidence of home advantage")
+    st.write("✅ **Medal Forecasting** - ARIMA and ML predictions for future Olympics")  
+    st.write("✅ **Strategic Insights** - Actionable recommendations for 2028 LA Olympics")
+    st.write("✅ **Sport-wise Breakdown** - Identify strongest competitive areas")
+    st.write("✅ **Global Competition Context** - USA's position vs other nations")
